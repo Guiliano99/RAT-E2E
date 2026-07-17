@@ -1,0 +1,137 @@
+# Infra stack — TPM attestation verifier + CMP mock CA.
+#
+# Infra half of the per-folder split.  Runs as its OWN Compose project, in a
+# separate shell from the attester half (../attestation-attester/docker-compose.yml).
+# The two projects interconnect over the external bridges from
+# scripts/configure-network.bash and share the external tpm-ca volume:
+#
+#   docker compose -f attestation-infra/docker-compose.yml up --build   # shell 2
+#
+# tpm-verifier and mock-ca are in the same project, so depends_on and
+# service-name DNS (mock-ca → http://tpm-verifier:8444) work between them; the
+# attester reaches mock-ca by IP (192.168.100.12:5000) over infra-ra.
+
+services:
+
+  # ── TPM attestation verifier ─────────────────────────────────────────────────
+  # Two routes, both served by verifier_service.py; anything else 404s:
+  #   POST /submitEvidenceCMP   appraise Evidence, return an EAR (VERIFIER_SUBMIT_PATH)
+  #   GET  /ear-verification-key  the EAR signing key's public half (health check)
+  # Reads the trusted CA cert from /tpm-ca/ca_cert.pem (written by the attester-side
+  # provisioner, shared via the external tpm-ca volume) to verify the AK
+  # certificate chain on every evidence submission.
+  tpm-verifier:
+    # Build from the repo root so the Dockerfile can COPY the tpm-verifier src;
+    # libattest is cloned from its published branch inside the build.
+    build:
+      context: ..
+      dockerfile: attestation-infra/tpm-verifier/Dockerfile
+      args:
+        # NEG=1 bakes the foreign-manufacturer CA into the image as the AK-chain
+        # trust anchor (negative wrong-CA demo).  Start it with one command:
+        #   NEG=1 docker compose up --build         (or `make neg-start`)
+        # Default 0 keeps the live provisioner CA below (positive path).
+        NEG: "${NEG:-0}"
+    environment:
+      # Positive default: the CA the attester's provisioner wrote to the shared
+      # volume (it signed the AK cert).  When the image was built with NEG=1 the
+      # entrypoint overrides this with /opt/tpm-verifier/config/wrong_ca_cert.pem.
+      TRUSTED_CA_CERT_FILE: "/tpm-ca/ca_cert.pem"
+      LISTEN_PORT: "8444"
+      # PCR reference values written by provisioner; when set, the quote backend
+      # enforces pcrDigest against this baseline (G2).
+      PCR_REFERENCE_VALUES_FILE: "/tpm-ca/pcr_reference.json"
+      # EAR signing key persisted across restarts via tpm-ca so EAR JWTs in
+      # issued certs stay verifiable (Q1); created on first run, reused after.
+      EAR_SIGNING_KEY_FILE: "/tpm-ca/ear_signing_key.pem"
+      TPM_QUOTE_PCRS: "${TPM_QUOTE_PCRS:-0,1,2,3,4}"
+      # Statement OIDs the verifier appraises.  Default = TcgAttestQuote
+      # (platform, this branch).  Add 2.23.133.20.1 for the certify profile:
+      #   VERIFIER_ALLOWED_OIDS=2.23.133.20.2,2.23.133.20.1
+      VERIFIER_ALLOWED_OIDS: "${VERIFIER_ALLOWED_OIDS:-2.23.133.20.2}"
+    volumes:
+      - tpm-ca:/tpm-ca
+    networks:
+      infra-verifier:
+        ipv4_address: 192.168.110.11
+    healthcheck:
+      # GET /ear-verification-key (stateless): 200 means the HTTP server is alive
+      # and the EAR signing key loaded.  Python so no curl/jq is needed.
+      test:
+        - "CMD-SHELL"
+        - |
+          python3 -c "
+          import urllib.request, urllib.error
+          try:
+              resp = urllib.request.urlopen('http://localhost:8444/ear-verification-key', timeout=3)
+              exit(0 if resp.status == 200 else 1)
+          except Exception:
+              exit(1)
+          "
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  # ── CMP mock CA ───────────────────────────────────────────────────────────────
+  # Issues X.509 certificates via CMP.  The MockCA owns nonce state: it generates
+  # nonces at GenM time and submits each piece of evidence to the verifier with
+  # its expected nonce via POST /submitEvidenceCMP.
+  #
+  #   VERIFIER_OID_ROUTES    JSON map { statement_oid → URL } for OID-based routing.
+  #   VERIFIER_URL_FALLBACK  Default URL when the OID has no route.
+  # At least one must yield a usable route; VerifierRegistry raises otherwise.
+  mock-ca:
+    build:
+      context: ..
+      dockerfile: attestation-infra/mockca/Dockerfile
+    depends_on:
+      tpm-verifier:
+        condition: service_healthy
+    environment:
+      # Both TPM evidence statement types route to the one tpm-verifier
+      # (same project, reached by service-name DNS):
+      # TcgAttestQuote (2.23.133.20.2) and TcgAttestCertify (2.23.133.20.1).
+      VERIFIER_OID_ROUTES: '{"2.23.133.20.2":"http://tpm-verifier:8444","2.23.133.20.1":"http://tpm-verifier:8444"}'
+      VERIFIER_URL_FALLBACK: "http://tpm-verifier:8444"
+      # The quote profile uses libattest's fixed wire OIDs:
+      # NonceRequest.type=1.2.3.4.5 and NonceResponse.type=1.2.3.4.6.
+      TPM_QUOTE_PCRS: "${TPM_QUOTE_PCRS:-0,1,2,3,4}"
+      # Key-attestation request-type OID (GenM NonceRequest.type for certify);
+      # must match the gencmpclient / attester value.
+      TPM_KEY_ATTEST_OID: "${TPM_KEY_ATTEST_OID:-1.3.6.1.4.1.99999.4}"
+      # gencmpclient echoes the GenP senderNonce as recipNonce in the IR; the
+      # default MockCA rejects that on an initial request — accept it for RATS.
+      ALLOW_RECIPIENT_NONCE: "true"
+    ports:
+      # Host publish is incidental (the attester reaches the CA as 192.168.100.12:5000).
+      # Override MOCK_CA_HOST_PORT to avoid colliding with host port 5000.
+      - "${MOCK_CA_HOST_PORT:-5000}:5000"
+    networks:
+      infra-ra:
+        ipv4_address: 192.168.100.12
+      infra-verifier:
+        ipv4_address: 192.168.110.12
+    healthcheck:
+      # GET /root-cert returns the CA certificate DER.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/root-cert')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+# Shared with the attester project via the EXTERNAL tpm-ca volume
+# (`docker volume create tpm-ca`, done by scripts/configure-network.bash).
+volumes:
+  tpm-ca:
+    external: true
+    name: tpm-ca
+
+# External bridges created once by scripts/configure-network.bash.
+networks:
+  infra-ra:
+    external: true
+    name: infra-ra
+  infra-verifier:
+    external: true
+    name: infra-verifier

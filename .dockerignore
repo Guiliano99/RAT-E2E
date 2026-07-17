@@ -1,0 +1,55 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Documentation
+README.md
+*.md
+figures/
+
+# Environment files
+*.env
+.env.*
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Temporary files
+tmp/
+.cache/
+
+# All dependencies (libattest-py, OpenSSL, gencmpclient, cmp-test-suite) are
+# cloned from their published branches during build — nothing is copied from tmp/.
+
+# CI/CD and tooling
+.github/
+.claude/
+scripts/
+
+# Build artifacts
+dist/
+build/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+./tmp

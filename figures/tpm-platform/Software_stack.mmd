@@ -1,0 +1,37 @@
+%% Software stack — TPM platform-attestation demo (TPMPCRDemo)
+%% Two separate Compose projects (attester + infra), interconnected by the
+%% external infra-ra/infra-verifier/provisioning bridges + the tpm-ca volume.
+%% Render: mmdc -i Software_stack.mmd -o Software_stack.png
+flowchart TB
+    subgraph PROJECT["TPMPCRDemo — two Compose projects (attester + infra): external bridges + tpm-ca volume"]
+        direction LR
+
+        subgraph ATT["attestation-attester/docker-compose.yml — client setup"]
+            direction TB
+            SIM["simulator<br/><i>TCG TPM 2.0 reference sim (mssim, Debug build, V184)</i>"]
+            PROV["provisioner<br/><i>persistent EK/AK + CA keypair + AK cert + PCR reference</i>"]
+            ATTER["tpm-platform-attester<br/><b>end entity (device with Attester)</b><br/><i>TPM2_Quote over PCRs → cmpClient IR</i>"]
+            ATTBUILD["image layers:<br/>OpenSSL fork (demo/docker_RATS2_OLD_V9, +libcjson)<br/>+ tpm2-tss + tpm2-openssl 1.3.0 + tpm2-tools<br/>+ gencmpclient (demo/docker_RATS2_TPMV4_COSE)<br/>+ libattest-py@UpdateV8_1"]
+            ATTER --- ATTBUILD
+        end
+
+        subgraph INF["attestation-infra/docker-compose.yml — verifier + CA/RA"]
+            direction TB
+            VER["tpm-verifier<br/><b>Verifier</b><br/><i>stdlib http.server; tpm2-pytss + cryptography + libattest-py@UpdateV8_1</i><br/>POST /submitEvidenceCMP → EAR JWT<br/>(appraises pcrDigest vs pcr_reference.json)"]
+            CA["mock-ca<br/><b>RA/CA (Relying Party)</b><br/><i>cmp-test-suite MockCA + libattest-py</i><br/>issues X.509 only after attestation"]
+        end
+    end
+
+    VOL[("tpm-ca volume<br/>CA cert · AK cert · EAR key · PCR reference")]
+    NET{{"external bridges: infra-ra · infra-verifier · provisioning<br/>(host :5000 → mock-ca)"}}
+
+    SIM -->|mssim TCTI| PROV
+    PROV -->|handles + certs + PCR ref| ATTER
+    ATTER -->|"CMP genm → ir (quote evidence + PCR sel + nonce)"| CA
+    CA -->|"POST evidence + nonce"| VER
+    VER -->|EAR verdict| CA
+    CA -->|"X.509 cert (ip)"| ATTER
+
+    PROV -. writes .-> VOL
+    VER -. reads .-> VOL
+    PROJECT --- NET

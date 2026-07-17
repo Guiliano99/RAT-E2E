@@ -1,0 +1,29 @@
+%% Attester evidence construction — TPMPCRDemo (TPM 2.0 platform / quote profile).
+%%
+%% Branch truth:
+%%   gencmpclient@demo/docker_RATS2_TPMV4_COSE — cmpClient drives the quote through its
+%%       embedded Python interpreter (src/tpm_py_bridge.c → libattest.attester.
+%%       evidence_bridge), so libattest-py IS the live evidence generator here; it is
+%%       on the enrolment critical path, not just a decoder for the walkthrough tail.
+%%   libattest-py@UpdateV8_1 formats/tpm/tcg.py — id-tcg-attest-quote 2.23.133.20.2 and
+%%       the statement SEQUENCE; formats/csrattest/csr_attest_structures.py — bundle.
+%% Local construction only: the CMP/HTTP exchange lives in the sibling diagrams.
+%%
+%% Render: npx -y @mermaid-js/mermaid-cli -i attester-evidence.mmd -o attester-evidence.png
+sequenceDiagram
+    autonumber
+    participant A as end entity<br/>device with Attester<br/>cmpClient → libattest evidence_bridge
+    participant T as TPM 2.0<br/>TCG reference simulator<br/>mssim host=simulator:2321
+
+    Note over A,T: Inputs from the genp NonceResponse (see cmp-nonce-exchange):<br/>nonce N, pcrSelection { 0,1,2,3,4 }, hashAlgo 11 (TPM_ALG_SHA256).<br/>AK is the persistent handle 0x81010002 laid down by provision.sh.
+
+    A->>T: TPM2_Quote (Esys_Quote) {<br/>  signHandle     = AK 0x81010002<br/>  qualifyingData = N<br/>  PCRselect      = TPML_PCR_SELECTION {<br/>    hash = TPM_ALG_SHA256, pcrSelect = bitmap{ 0,1,2,3,4 } } }
+
+    Note over T: Sign a TPMS_ATTEST over the current PCR bank with the AK.
+
+    T-->>A: quoted    = TPMS_ATTEST (TPM-native marshalled) {<br/>  magic     = 0xff544347 (TPM_GENERATED_VALUE)<br/>  type      = 0x8018 (TPM_ST_ATTEST_QUOTE)<br/>  extraData = N — binds this quote to the RA nonce<br/>  attested  = TPMS_QUOTE_INFO {<br/>    pcrSelect = SHA-256 { 0,1,2,3,4 }<br/>    pcrDigest = digest over the selected PCRs } }<br/>signature = TPMT_SIGNATURE (TPM-native marshalled)
+
+    A->>T: Esys_PCR_Read (same selection)
+    T-->>A: pcrValues — raw per-PCR digests, the preimage of pcrDigest
+
+    Note over A: Wrap the TPM-native bytes in the typed DER statement.<br/>NOTE: there is no distinct TcgAttestQuote pyasn1 type — quote and<br/>certify share one SEQUENCE, dispatched by AttestationStatement.type.<br/><br/>TcgAttest ::= SEQUENCE {<br/>  tpmSAttest = OCTET STRING (raw TPMS_ATTEST)<br/>  signature  = OCTET STRING (raw TPMT_SIGNATURE)<br/>  [3rd] = OCTET STRING — pcrValues here.<br/>          The type names it tpmTPublic, which the certify<br/>          profile (2.23.133.20.1) uses instead. }<br/><br/>AttestationStatement ::= SEQUENCE {<br/>  type = 2.23.133.20.2 (id-tcg-attest-quote)<br/>  stmt = ANY — the TcgAttest SEQUENCE itself,<br/>         typed, NOT an opaque OCTET STRING wrapper }<br/><br/>AttestationBundle ::= SEQUENCE {<br/>  attestations = { that statement }<br/>  certs        = AK certificate chain (CA-signed by provision.sh) }<br/><br/>Carried as the id-aa-attestation CSR attribute / CertTemplate<br/>extension in the ir — see enrollment-appraisal.

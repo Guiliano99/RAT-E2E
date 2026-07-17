@@ -1,0 +1,136 @@
+# Attester stack — TPM platform-attestation (quote) / key-attestation (certify) profile.
+#
+# Attester half of the per-folder split.  This file and the infra half
+# (../attestation-infra/docker-compose.yml) run as TWO SEPARATE Compose projects
+# (two dedicated shells), interconnected by the external bridges created by
+# scripts/configure-network.bash (infra-ra 192.168.100/24, infra-verifier
+# 192.168.110/24, provisioning 192.168.200/24) and the external tpm-ca volume:
+#
+#   ./scripts/configure-network.bash          # once: bridges + `docker volume create tpm-ca`
+#   docker compose -f attestation-attester/docker-compose.yml up --build   # shell 1
+#   docker compose -f attestation-infra/docker-compose.yml   up --build   # shell 2
+#   docker exec -it <attester> /app/request-certificate.bash              # enrol on demand
+#
+# The attester is LONG-LIVED: the provisioner sets up the TPM, the attester idles,
+# and request-certificate.bash drives the CMP enrolment on demand (like the
+# sw-runtime EAR demo).  Build contexts are the repo root (.. resolves there).
+
+services:
+
+  # ── TCG reference TPM 2.0 simulator ─────────────────────────────────────────
+  # Exposes the mssim TCP protocol on ports 2321 (commands) and 2322 (platform).
+  simulator:
+    build:
+      context: ..
+      dockerfile: attestation-attester/tpm-platform-attest/Dockerfile.simulator
+    restart: unless-stopped
+    healthcheck:
+      # kill -0 1 (signal 0 to PID 1) checks the simulator process is alive
+      # without opening a TCP connection to port 2321 — raw TCP probes corrupt
+      # the mssim per-connection read loop and block legitimate tpm2_* commands.
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    networks:
+      provisioning:
+        ipv4_address: 192.168.200.20
+
+  # ── One-time EK/AK provisioner ───────────────────────────────────────────────
+  # Runs provision.sh once: creates persistent TPM handles 0x81010001 (EK) and
+  # 0x81010002 (AK), generates a local CA keypair, and issues a CA-signed AK
+  # certificate.  All artefacts are written to the shared tpm-ca volume so the
+  # infra-side tpm-verifier can read the CA cert / PCR reference.
+  provisioner:
+    build:
+      context: ..
+      dockerfile: attestation-attester/tpm-platform-attest/Dockerfile
+    entrypoint: ["/app/provision.sh"]
+    depends_on:
+      simulator:
+        condition: service_healthy
+    environment:
+      TPM2TOOLS_TCTI: "mssim:host=simulator,port=2321"
+      # PROVISION_MODE=fresh evicts existing handles and re-provisions every run;
+      # default (static) is idempotent (skips if handles already exist).
+      PROVISION_MODE: "${PROVISION_MODE:-static}"
+    volumes:
+      - tpm-ca:/tpm-ca
+    networks:
+      provisioning:
+        ipv4_address: 192.168.200.21
+
+  # ── Attester: OpenSSL fork + tpm2-openssl + tpm2-tools + gencmpclient ─────────
+  # Waits for the provisioner (handles + AK cert), then idles.  Enrolment is
+  # on demand: `docker exec <attester> /app/request-certificate.bash` runs the
+  # CMP IR with Esys_Certify/quote attestation against the infra-side mock-ca
+  # (reached at 192.168.100.12:5000 over the external infra-ra bridge).
+  tpm-platform-attester:
+    build:
+      context: ..
+      dockerfile: attestation-attester/tpm-platform-attest/Dockerfile
+    depends_on:
+      provisioner:
+        condition: service_completed_successfully
+    environment:
+      TPM2TOOLS_TCTI:   "mssim:host=simulator,port=2321"
+      TPM2OPENSSL_TCTI: "mssim:host=simulator,port=2321"
+      # mock-ca lives in the infra project; reach it over the external infra-ra
+      # bridge by IP (cross-project service-name DNS is not available).
+      CMP_SERVER:       "192.168.100.12:5000"
+      CMP_PATH:         "issuing"
+      CMP_RECIPIENT:    "/CN=CMP-Test-Suite-CA"
+      CMP_SUBJECT:      "/CN=tpm-platform-attester"
+      CMP_REF:          "tpm-platform-attester"
+      CMP_SECRET:       "SiemensIT"
+      # Negative test (gate G5): CMP_BAD_ATTEST_SIG=1 corrupts the AK signature;
+      # the verifier rejects and the MockCA answers PKIFailureInfo badMessageCheck.
+      CMP_BAD_ATTEST_SIG: "${CMP_BAD_ATTEST_SIG:-0}"
+      # CMP_MSG_CAPTURE=1 dumps the four CMP PKIMessages as DER under ./output.
+      CMP_MSG_CAPTURE:  "${CMP_MSG_CAPTURE:-0}"
+      # POPO mode: 0 (default) = raVerified; 1 = signature POPO via tpm2-abrmd.
+      CMP_POPO:         "${CMP_POPO:-0}"
+      # The quote profile uses gencmpclient/libattest's fixed wire OIDs:
+      # NonceRequest.type=1.2.3.4.5 and NonceResponse.type=1.2.3.4.6.
+      TPM_QUOTE_PCRS: "${TPM_QUOTE_PCRS:-0,1,2,3,4}"
+      # Statement type: quote (platform, TPM2_Quote → TcgAttestQuote 2.23.133.20.2)
+      # or certify (key attestation, TPM2_Certify → TcgAttestCertify 2.23.133.20.1).
+      # This branch (TPMPCRDemo) defaults to the platform quote profile.
+      CMP_ATTEST_TYPE:  "${CMP_ATTEST_TYPE:-quote}"
+      # Key-attestation request-type OID (must match the MockCA's value).
+      TPM_KEY_ATTEST_OID: "${TPM_KEY_ATTEST_OID:-1.3.6.1.4.1.99999.4}"
+    volumes:
+      - tpm-ca:/tpm-ca
+      # Output dir under tpm-platform-attest/ so e2e-test.sh (which lives there
+      # and reads ${SCRIPT_DIR}/output) sees the published artefacts.
+      - ./tpm-platform-attest/output:/output
+    networks:
+      provisioning:
+        ipv4_address: 192.168.200.22
+      infra-ra:
+        ipv4_address: 192.168.100.10
+      infra-verifier:
+        ipv4_address: 192.168.110.10
+
+# Shared volume for the provisioner's CA keypair / AK cert / PCR reference and
+# the verifier's EAR signing key.  EXTERNAL so the separate attester and infra
+# projects share one volume — create it with `docker volume create tpm-ca`
+# (scripts/configure-network.bash does this).
+volumes:
+  tpm-ca:
+    external: true
+    name: tpm-ca
+
+# External bridges created once by scripts/configure-network.bash; shared with
+# the infra project (and, one demo at a time, the EAR demos).
+networks:
+  infra-ra:
+    external: true
+    name: infra-ra
+  infra-verifier:
+    external: true
+    name: infra-verifier
+  provisioning:
+    external: true
+    name: provisioning

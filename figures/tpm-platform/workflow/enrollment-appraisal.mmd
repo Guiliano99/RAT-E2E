@@ -1,0 +1,34 @@
+%% Certificate enrollment and appraisal — TPMPCRDemo (TPM 2.0 platform / quote profile).
+%%
+%% Branch truth:
+%%   attestation-infra/tpm-verifier/src/verifier_service.py — POST /submitEvidenceCMP
+%%       body { nonce, evidence, oid, resp_info_json }, reply { ear }, submods.TPM
+%%   attestation-infra/tpm-verifier/src/tpm_verifier.py — G_PCR_BIND / G_PCR_VALUES_BIND / G2
+%%   attestation-infra/docker-compose.yml — VERIFIER_OID_ROUTES, VERIFIER_ALLOWED_OIDS
+%% Positive path only: a valid quote, an affirming EAR, an issued certificate.
+%% Negative cases (CMP_BAD_ATTEST_SIG=1, wrong CA) live in the verify-tpmpcr gate.
+%%
+%% Render: npx -y @mermaid-js/mermaid-cli -i enrollment-appraisal.mmd -o enrollment-appraisal.png
+sequenceDiagram
+    autonumber
+    participant A as end entity<br/>device with Attester<br/>cmpClient (gencmpclient)
+    participant M as RA/CA (Relying Party)<br/>mock-ca 192.168.100.12:5000 /issuing
+    participant V as Verifier<br/>tpm-verifier http://tpm-verifier:8444
+
+    Note over A,V: The RA/CA owns the nonce state and is the only Verifier caller.<br/>The end entity never contacts the Verifier.
+
+    A->>M: POST /issuing — application/pkixcmp<br/>PKIMessage {<br/>  body: ir [ CertReqMsg {<br/>    certTemplate: subject /CN=tpm-platform-attester + TPM-resident SPKI<br/>    id-aa-attestation = DER(AttestationBundle) } ] }
+
+    Note over M: Select the statement whose type = 2.23.133.20.2, then look up<br/>transactionID → N, pcrSelection, hashAlgo. Reject if expired or used.
+
+    M->>V: POST /submitEvidenceCMP — application/json<br/>{<br/>  "nonce":    base64(N)<br/>  "evidence": base64(DER(AttestationBundle))<br/>  "oid":      "2.23.133.20.2"<br/>  "resp_info_json": { "pcrSelection": [0,1,2,3,4], "hashAlgo": 11 }<br/>}<br/><br/>respInfo crosses this internal hop as plain JSON, not DER —<br/>the verifier re-encodes it to TPM20QuoteRespInfo for the<br/>G_PCR_BIND check. The CMP wire stays DER throughout.<br/>Keys mirror the ASN.1 names (respinfo.tpm20_quote_resp_info_to_json).<br/>from_json also accepts legacy pcrs / hashAlgId aliases.
+
+    Note over V: Refuse any oid outside VERIFIER_ALLOWED_OIDS, then appraise:<br/>AK chain vs /tpm-ca/ca_cert.pem · AK signature over TPMS_ATTEST ·<br/>magic 0xff544347 and type 0x8018 · extraData == N ·<br/>G_PCR_BIND quoted set == requested set ·<br/>G_PCR_VALUES_BIND H(pcrValues) == signed pcrDigest ·<br/>G2 pcrDigest vs /tpm-ca/pcr_reference.json
+
+    V-->>M: HTTP 200 — { "ear": compact EAR JWT (ES256) }<br/><br/>payload.submods.TPM {<br/>  "ear.status" = "affirming"<br/>  "tpm.pcr-digest", "tpm.hash-alg", "tpm.pcr-selection"<br/>  "tpm.pcr-digest-ref-matched"<br/>  "tpm.pcrs" + "tpm.pcr-digest-recomputed" — only once<br/>      G_PCR_VALUES_BIND has bound the values to the signature<br/>}<br/>payload.eat_nonce = base64url(N)
+
+    Note over M: Gate on submods.TPM["ear.status"] == affirming,<br/>burn the nonce (used=true), and embed the EAR JWT verbatim<br/>in the certificate under extension 1.7.6.5.123.
+
+    M-->>A: HTTP 200 — application/pkixcmp<br/>PKIMessage {<br/>  body: ip [ CertRepMessage { status = accepted, cert } ] }
+
+    Note over A: Save output/enrolled.pem. The certificate carries the<br/>Verifier's EAR under 1.7.6.5.123, so a certificate consumer can<br/>read which platform state was attested — not merely that it passed.<br/>(NB: "Relying Party" is the RA/CA, per RFC 9334 — not this reader.)

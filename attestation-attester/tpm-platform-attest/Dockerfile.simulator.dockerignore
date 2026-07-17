@@ -1,0 +1,3 @@
+# The simulator image is built entirely from GitHub; exclude the entire
+# build context so the daemon transfer is near-zero.
+**

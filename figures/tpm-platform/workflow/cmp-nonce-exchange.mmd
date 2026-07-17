@@ -1,0 +1,26 @@
+%% CMP nonce exchange — TPMPCRDemo (TPM 2.0 platform / quote profile).
+%%
+%% Spec: draft-ietf-lamps-attestation-freshness-08 §3 (nonce request/response), §4 (CMP).
+%% Branch truth (libattest-py@UpdateV8_1, gencmpclient@demo/docker_RATS2_TPMV4_COSE):
+%%   formats/csrattest/attest_nonce_freshness_structures.py — NonceRequest / NonceResponse
+%%   formats/tpm/quote_profile.py — TPM20QuoteReqInfo / TPM20QuoteRespInfo
+%% The OIDs below are placeholders this demo puts on the wire, NOT the values the
+%% draft assigns (id-it-nonceRequest 1.3.6.1.5.5.7.4.98 / -nonceResponse …4.99).
+%% Field values are a live capture: CMP_MSG_CAPTURE=1 → output/req1-genm.der,
+%% output/rsp1-genp.der, decoded by pretty_print_stmt.py → output/nonce-exchange.txt.
+%%
+%% Render: npx -y @mermaid-js/mermaid-cli -i cmp-nonce-exchange.mmd -o cmp-nonce-exchange.png
+sequenceDiagram
+    autonumber
+    participant A as end entity<br/>device with Attester<br/>cmpClient (gencmpclient)
+    participant M as RA/CA (Relying Party)<br/>mock-ca 192.168.100.12:5000 /issuing
+
+    Note over A,M: One genm/genp round trip. The nonce is server-issued —<br/>the client never supplies or proposes its value.<br/>No verifier contact is required to issue a nonce.
+
+    A->>M: POST /issuing — application/pkixcmp<br/>PKIMessage {<br/>  body: genm [ InfoTypeAndValue {<br/>    infoType = 1.2.840.113549.1.9.16.2.8888 (nonceRequest)<br/>    infoValue = DER(NonceRequest) } ] }<br/><br/>NonceRequest ::= SEQUENCE {<br/>  len — OPTIONAL, omitted by this client<br/>  reqTypeInfo NonceRequestTypeInfo {<br/>    type    = 1.2.3.4.5<br/>    reqInfo = DER(TPM20QuoteReqInfo {<br/>      certificateName   = { ak-1, ak-2, ak-3 }<br/>      supportedHashAlgo = { 11 } }) } }
+
+    Note over M: Route on reqTypeInfo.type → TPM quote profile.<br/>Apply PCR policy, mint N = 32 random bytes, store<br/>transactionID → N, pcrSelection, hashAlgo, expiry, used=false
+
+    M-->>A: HTTP 200 — application/pkixcmp<br/>PKIMessage {<br/>  body: genp [ InfoTypeAndValue {<br/>    infoType = 1.2.840.113549.1.9.16.2.8889 (nonceResponse)<br/>    infoValue = DER(NonceResponse) } ] }<br/><br/>NonceResponse ::= SEQUENCE {<br/>  nonce  = 0x258d6ae3…d1cb61c4 — 32 bytes, the challenge<br/>  expiry = 50 — seconds<br/>  respTypeInfo NonceResponseTypeInfo {<br/>    type     = 1.2.3.4.6<br/>    respInfo = DER(TPM20QuoteRespInfo {<br/>      certificateName = ak-1<br/>      pcrSelection = { 0, 1, 2, 3, 4 }<br/>      hashAlgo     = 11 (TPM_ALG_SHA256) }) } }
+
+    Note over A: Retain N as TPM2_Quote qualifyingData and take the quote<br/>parameters from respInfo — never overloaded into nonce.<br/>The same transactionID binds the later ir to this state.

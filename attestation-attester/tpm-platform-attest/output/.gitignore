@@ -1,0 +1,4 @@
+# Ignore all generated artefacts; keep the directory tracked via .gitkeep.
+*
+!.gitkeep
+!.gitignore

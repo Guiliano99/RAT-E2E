@@ -1,0 +1,5 @@
+# Build context: repository root (context: ../..).
+# The MockCA image clones cmp-test-suite and libattest from their published
+# GitHub branches inside the build (see Dockerfile), so it needs nothing from the
+# build context. Exclude everything to keep the context empty.
+**

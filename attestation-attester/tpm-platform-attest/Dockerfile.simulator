@@ -1,0 +1,49 @@
+# TCG reference TPM 2.0 simulator, exposing the mssim TCP protocol on
+# ports 2321 (commands) and 2322 (platform control).
+#
+# Multi-stage: the simulator is compiled in a throwaway builder layer and only
+# the binary plus the OpenSSL runtime library land in the final image. The
+# source is pinned to a release tag so rebuilds are reproducible; override
+# with:  --build-arg TCG_TPM_REV=<tag>
+# (list tags: git ls-remote --tags https://github.com/TrustedComputingGroup/TPM.git)
+
+FROM ubuntu:24.04 AS build
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TCG_TPM_REV=V184
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git ca-certificates libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN git clone --depth 1 --branch "${TCG_TPM_REV}" \
+    https://github.com/TrustedComputingGroup/TPM.git .
+
+# CMakeLists.txt lives in TPMCmd/, not the repo root.
+# The build type must stay Debug: the simulator's default configuration
+# enables insecure test options (deterministic RNG, manufacturing commands)
+# that the source forbids outside DEBUG builds (VerifyConfiguration.h:
+# "#error using insecure options not in DEBUG mode").
+RUN cmake -S TPMCmd -B out -DCMAKE_BUILD_TYPE=Debug && \
+    cmake --build out --parallel
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /build/out/Simulator/Simulator /usr/local/bin/tpm2-simulator
+
+# The simulator writes its NV state (NVChip) to the working directory.
+# State is ephemeral by design here: each container start is a clean TPM.
+# Mount a volume at /tpmstate if persistence across restarts is needed.
+WORKDIR /tpmstate
+
+# 2321 — mssim command port, 2322 — platform control port
+EXPOSE 2321 2322
+
+# NOTE: do not health-probe the mssim ports with raw TCP connects; the
+# simulator's per-connection read loop is corrupted by probe connects.
+# docker-compose.yml uses "kill -0 1" instead.
+CMD ["/usr/local/bin/tpm2-simulator"]

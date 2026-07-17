@@ -1,0 +1,14 @@
+# Exclude everything by default, then include only what this build needs.
+# Docker BuildKit picks up this file automatically when the dockerfile path is
+# attestation-attester/tpm-platform-attest/Dockerfile and the build context is
+# the repository root. OpenSSL, gencmpclient and libattest are all cloned from
+# their pinned branches inside the Dockerfile, so none of them comes from this
+# context — only the scripts below do.
+
+**
+
+# ── Attester scripts ──────────────────────────────────────────────────────────
+!attestation-attester/
+!attestation-attester/tpm-platform-attest/
+!attestation-attester/tpm-platform-attest/entrypoint.sh
+!attestation-attester/tpm-platform-attest/provision.sh

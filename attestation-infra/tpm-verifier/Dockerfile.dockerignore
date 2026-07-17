@@ -1,0 +1,17 @@
+# Build context: repository root (context: ../..)
+# Include only the tpm-verifier source; libattest is cloned in the Dockerfile.
+
+**
+
+# ── Required source tree ──────────────────────────────────────────────────────
+!attestation-infra/
+!attestation-infra/tpm-verifier/
+!attestation-infra/tpm-verifier/src/
+!attestation-infra/tpm-verifier/src/**
+!attestation-infra/tpm-verifier/config/
+!attestation-infra/tpm-verifier/config/**
+!attestation-infra/tpm-verifier/entrypoint.sh
+
+# ── Exclude cache ─────────────────────────────────────────────────────────────
+**/__pycache__
+**/*.pyc
